@@ -1,0 +1,237 @@
+// Criar índices para garantir unicidade e acelerar buscas
+CREATE CONSTRAINT FOR (r:Region) REQUIRE r.regionkey IS UNIQUE;
+CREATE CONSTRAINT FOR (n:Nation) REQUIRE n.nationkey IS UNIQUE;
+CREATE CONSTRAINT FOR (c:Customer) REQUIRE c.custkey IS UNIQUE;
+CREATE CONSTRAINT FOR (p:Part) REQUIRE p.partkey IS UNIQUE;
+CREATE CONSTRAINT FOR (s:Supplier) REQUIRE s.suppkey IS UNIQUE;
+CREATE CONSTRAINT FOR (o:Order) REQUIRE o.orderkey IS UNIQUE;
+
+
+
+
+
+
+// 1. Carregar Regiões
+LOAD CSV FROM 'file:///region.tbl' AS row FIELDTERMINATOR '|'
+CREATE (:Region {regionkey: toInteger(row[0]), name: trim(row[1]), comment: trim(row[2])});
+
+// 2. Carregar Nações e ligar às Regiões
+LOAD CSV FROM 'file:///nation.tbl' AS row FIELDTERMINATOR '|'
+MATCH (r:Region {regionkey: toInteger(row[2])})
+CREATE (n:Nation {nationkey: toInteger(row[0]), name: trim(row[1]), comment: trim(row[3])})
+CREATE (n)-[:PERTENCE_A]->(r);
+
+// 3. Carregar Fornecedores e ligar às Nações
+LOAD CSV FROM 'file:///supplier.tbl' AS row FIELDTERMINATOR '|'
+MATCH (n:Nation {nationkey: toInteger(row[3])})
+CREATE (s:Supplier {
+    suppkey: toInteger(row[0]), name: trim(row[1]), address: trim(row[2]), 
+    phone: trim(row[4]), acctbal: toFloat(row[5]), comment: trim(row[6])
+})
+CREATE (s)-[:MORA_EM]->(n);
+
+// 4. Carregar Clientes e ligar às Nações
+LOAD CSV FROM 'file:///customer.tbl' AS row FIELDTERMINATOR '|'
+MATCH (n:Nation {nationkey: toInteger(row[3])})
+CREATE (c:Customer {
+    custkey: toInteger(row[0]), name: trim(row[1]), address: trim(row[2]), 
+    phone: trim(row[4]), acctbal: toFloat(row[5]), mktsegment: trim(row[6]), comment: trim(row[7])
+})
+CREATE (c)-[:MORA_EM]->(n);
+
+// 5. Carregar Peças (Part)
+LOAD CSV FROM 'file:///part.tbl' AS row FIELDTERMINATOR '|'
+CREATE (:Part {
+    partkey: toInteger(row[0]), name: trim(row[1]), mfgr: trim(row[2]), brand: trim(row[3]), 
+    type: trim(row[4]), size: toInteger(row[5]), container: trim(row[6]), 
+    retailprice: toFloat(row[7]), comment: trim(row[8])
+});
+
+// 6. Carregar Fornecimento (Liga Fornecedor à Peça)
+LOAD CSV FROM 'file:///partsupp.tbl' AS row FIELDTERMINATOR '|'
+MATCH (p:Part {partkey: toInteger(row[0])})
+MATCH (s:Supplier {suppkey: toInteger(row[1])})
+CREATE (s)-[:FORNECE_PECA {
+    availqty: toInteger(row[2]), supplycost: toFloat(row[3]), comment: trim(row[4])
+}]->(p);
+
+// 7. Carregar Pedidos (Liga Cliente ao Pedido)
+LOAD CSV FROM 'file:///orders.tbl' AS row FIELDTERMINATOR '|'
+MATCH (c:Customer {custkey: toInteger(row[1])})
+CREATE (o:Order {
+    orderkey: toInteger(row[0]), orderstatus: trim(row[2]), totalprice: toFloat(row[3]),
+    orderdate: trim(row[4]), orderpriority: trim(row[5]), clerk: trim(row[6]),
+    shippriority: toInteger(row[7]), comment: trim(row[8])
+})
+CREATE (c)-[:FEZ_PEDIDO]->(o);
+
+// 8. Carregar Itens do Pedido (Atenção: Uso de lotes para não estourar a memória RAM)
+// O comando :auto deve ir junto na primeira linha.
+:auto
+LOAD CSV FROM 'file:///lineitem.tbl' AS row FIELDTERMINATOR '|'
+CALL {
+    WITH row
+    MATCH (o:Order {orderkey: toInteger(row[0])})
+    MATCH (p:Part {partkey: toInteger(row[1])})
+    CREATE (o)-[:CONTEM_ITEM {
+        linenumber: toInteger(row[3]), suppkey: toInteger(row[2]), quantity: toFloat(row[4]),
+        extendedprice: toFloat(row[5]), discount: toFloat(row[6]), tax: toFloat(row[7]),
+        returnflag: trim(row[8]), linestatus: trim(row[9]), shipdate: trim(row[10]),
+        commitdate: trim(row[11]), receiptdate: trim(row[12]), shipinstruct: trim(row[13]),
+        shipmode: trim(row[14]), comment: trim(row[15])
+    }]->(p)
+} IN TRANSACTIONS OF 1000 ROWS;
+
+
+
+
+
+
+
+
+
+// Consulta 1
+MATCH ()-[l:CONTEM_ITEM]->() WHERE l.shipdate <= '1998-12-01'
+RETURN l.returnflag AS l_returnflag, l.linestatus AS l_linestatus, SUM(l.quantity) AS sum_qty, SUM(l.extendedprice) AS sum_base_price, SUM(l.extendedprice * (1 - l.discount)) AS sum_disc_price, SUM(l.extendedprice * (1 - l.discount) * (1 + l.tax)) AS sum_charge, AVG(l.quantity) AS avg_qty, AVG(l.extendedprice) AS avg_price, AVG(l.discount) AS avg_disc, COUNT(l) AS count_order
+ORDER BY l_returnflag, l_linestatus;
+
+// Consulta 2
+MATCH (r:Region {name: 'AMERICA'})<-[:PERTENCE_A]-(n:Nation)<-[:MORA_EM]-(s:Supplier)-[ps:FORNECE_PECA]->(p:Part)
+WHERE p.size = 15 AND p.type CONTAINS 'PLATED'
+WITH p, MIN(ps.supplycost) AS min_cost
+MATCH (r2:Region {name: 'AMERICA'})<-[:PERTENCE_A]-(n2:Nation)<-[:MORA_EM]-(s2:Supplier)-[ps2:FORNECE_PECA]->(p)
+WHERE ps2.supplycost = min_cost
+RETURN s2.acctbal AS s_acctbal, s2.name AS s_name, n2.name AS n_name, p.partkey AS p_partkey, p.mfgr AS p_mfgr, s2.address AS s_address, s2.phone AS s_phone, s2.comment AS s_comment
+ORDER BY s_acctbal DESC, n_name, s_name, p_partkey;
+
+// Consulta 3
+MATCH (c:Customer {mktsegment: 'BUILDING'})-[:FEZ_PEDIDO]->(o:Order)-[l:CONTEM_ITEM]->(p:Part)
+WHERE o.orderdate < '1995-03-15' AND l.shipdate > '1995-03-15'
+RETURN o.orderkey AS l_orderkey, SUM(l.extendedprice * (1 - l.discount)) AS revenue, o.orderdate AS o_orderdate, o.shippriority AS o_shippriority
+ORDER BY revenue DESC, o_orderdate;
+
+// Consulta 4
+MATCH (o:Order)
+WHERE o.orderdate >= '1995-03-15' AND o.orderdate < '1995-06-15' AND EXISTS { MATCH (o)-[l:CONTEM_ITEM]->(:Part) WHERE l.commitdate < l.receiptdate }
+RETURN o.orderpriority AS o_orderpriority, count(o) AS order_count ORDER BY o_orderpriority;
+
+// Consulta 5
+MATCH (r:Region {name: 'AMERICA'})<-[:PERTENCE_A]-(n:Nation)<-[:MORA_EM]-(c:Customer)-[:FEZ_PEDIDO]->(o:Order)-[l:CONTEM_ITEM]->(:Part)
+WHERE o.orderdate >= '1995-03-15' AND o.orderdate < '1996-03-15'
+MATCH (s:Supplier {suppkey: l.suppkey})-[:MORA_EM]->(n)
+RETURN n.name AS n_name, SUM(l.extendedprice * (1 - l.discount)) AS revenue ORDER BY revenue DESC;
+
+// Consulta 6
+MATCH ()-[l:CONTEM_ITEM]->()
+WHERE l.shipdate >= '1994-01-01' AND l.shipdate < '1995-01-01' AND 0.05 <= l.discount <= 0.07 AND l.quantity < 24
+RETURN SUM(l.extendedprice * l.discount) AS revenue;
+
+// Consulta 7
+MATCH (n1:Nation)<-[:MORA_EM]-(s:Supplier), (n2:Nation)<-[:MORA_EM]-(c:Customer)
+WHERE (n1.name = 'FRANCE' AND n2.name = 'GERMANY') OR (n1.name = 'GERMANY' AND n2.name = 'FRANCE')
+MATCH (s)-[ps:FORNECE_PECA]->(p:Part)<-[l:CONTEM_ITEM]-(o:Order)<-[:FEZ_PEDIDO]-(c)
+WHERE l.suppkey = s.suppkey AND l.shipdate >= '1995-01-01' AND l.shipdate <= '1996-12-31'
+RETURN n1.name AS supp_nation, n2.name AS cust_nation, substring(l.shipdate, 0, 4) AS l_year, SUM(l.extendedprice * (1 - l.discount)) AS revenue
+ORDER BY supp_nation, cust_nation, l_year;
+
+// Consulta 8
+MATCH (r:Region {name: 'AMERICA'})<-[:PERTENCE_A]-(n1:Nation)<-[:MORA_EM]-(c:Customer)-[:FEZ_PEDIDO]->(o:Order)-[l:CONTEM_ITEM]->(p:Part)
+WHERE o.orderdate >= '1995-01-01' AND o.orderdate <= '1996-12-31' AND p.type = 'ECONOMY ANODIZED STEEL'
+MATCH (s:Supplier {suppkey: l.suppkey})-[:MORA_EM]->(n2:Nation)
+RETURN substring(o.orderdate, 0, 4) AS o_year, SUM(CASE WHEN n2.name = 'BRAZIL' THEN l.extendedprice * (1 - l.discount) ELSE 0 END) / SUM(l.extendedprice * (1 - l.discount)) AS mkt_share ORDER BY o_year;
+
+// Consulta 9
+MATCH (p:Part) WHERE p.name CONTAINS 'green'
+MATCH (s:Supplier)-[ps:FORNECE_PECA]->(p)<-[l:CONTEM_ITEM]-(o:Order) WHERE l.suppkey = s.suppkey
+MATCH (s)-[:MORA_EM]->(n:Nation)
+RETURN n.name AS nation, substring(o.orderdate, 0, 4) AS o_year, SUM(l.extendedprice * (1 - l.discount) - ps.supplycost * l.quantity) AS sum_profit
+ORDER BY nation, o_year DESC;
+
+// Consulta 10
+MATCH (n:Nation)<-[:MORA_EM]-(c:Customer)-[:FEZ_PEDIDO]->(o:Order)-[l:CONTEM_ITEM]->(:Part)
+WHERE o.orderdate >= '1993-10-01' AND o.orderdate < '1994-01-01' AND l.returnflag = 'R'
+RETURN c.custkey AS c_custkey, c.name AS c_name, SUM(l.extendedprice * (1 - l.discount)) AS revenue, c.acctbal AS c_acctbal, n.name AS n_name, c.address AS c_address, c.phone AS c_phone, c.comment AS c_comment
+ORDER BY revenue DESC;
+
+// Consulta 11
+MATCH (n:Nation {name: 'GERMANY'})<-[:MORA_EM]-(s:Supplier)-[ps:FORNECE_PECA]->(p:Part)
+WITH sum(ps.supplycost * ps.availqty) * 0.0001 AS threshold
+MATCH (n:Nation {name: 'GERMANY'})<-[:MORA_EM]-(s:Supplier)-[ps:FORNECE_PECA]->(p:Part)
+WITH p.partkey AS ps_partkey, sum(ps.supplycost * ps.availqty) AS value, threshold WHERE value > threshold
+RETURN ps_partkey, value ORDER BY value DESC;
+
+// Consulta 12
+MATCH (o:Order)-[l:CONTEM_ITEM]->(:Part)
+WHERE l.shipmode IN ['MAIL', 'SHIP'] AND l.commitdate < l.receiptdate AND l.shipdate < l.commitdate AND l.receiptdate >= '1994-01-01' AND l.receiptdate < '1995-01-01'
+RETURN l.shipmode AS l_shipmode, SUM(CASE WHEN o.orderpriority = '1-URGENT' OR o.orderpriority = '2-HIGH' THEN 1 ELSE 0 END) AS high_line_count, SUM(CASE WHEN o.orderpriority <> '1-URGENT' AND o.orderpriority <> '2-HIGH' THEN 1 ELSE 0 END) AS low_line_count
+ORDER BY l_shipmode;
+
+// Consulta 13
+MATCH (c:Customer)
+OPTIONAL MATCH (c)-[:FEZ_PEDIDO]->(o:Order) WHERE NOT o.comment =~ '.*special.*requests.*'
+WITH c.custkey AS c_custkey, count(o.orderkey) AS c_count
+WITH c_count, count(*) AS custdist
+RETURN c_count, custdist ORDER BY custdist DESC, c_count DESC;
+
+// Consulta 14
+MATCH ()-[l:CONTEM_ITEM]->(p:Part)
+WHERE l.shipdate >= '1995-09-01' AND l.shipdate < '1995-10-01'
+RETURN 100.00 * SUM(CASE WHEN p.type STARTS WITH 'PROMO' THEN l.extendedprice * (1 - l.discount) ELSE 0 END) / SUM(l.extendedprice * (1 - l.discount)) AS promo_revenue;
+
+// Consulta 15
+MATCH (o:Order)-[l:CONTEM_ITEM]->(p:Part)
+WHERE l.shipdate >= '1996-01-01' AND l.shipdate < '1996-04-01'
+WITH l.suppkey AS supplier_no, SUM(l.extendedprice * (1 - l.discount)) AS total_revenue
+WITH collect({supplier_no: supplier_no, total_revenue: total_revenue}) AS revenues, MAX(total_revenue) AS max_revenue
+UNWIND revenues AS r WITH r WHERE r.total_revenue = max_revenue
+MATCH (s:Supplier {suppkey: r.supplier_no})
+RETURN s.suppkey AS s_suppkey, s.name AS s_name, s.address AS s_address, s.phone AS s_phone, r.total_revenue AS total_revenue ORDER BY s_suppkey;
+
+// Consulta 16
+MATCH (s:Supplier)-[:FORNECE_PECA]->(p:Part)
+WHERE p.brand <> 'Brand#45' AND NOT p.type STARTS WITH 'MEDIUM POLISHED' AND p.size IN [49, 14, 23, 45, 19, 3, 36, 9] AND NOT s.comment =~ '.*Customer.*Complaints.*'
+RETURN p.brand AS p_brand, p.type AS p_type, p.size AS p_size, count(DISTINCT s.suppkey) AS supplier_cnt
+ORDER BY supplier_cnt DESC, p_brand, p_type, p_size;
+
+// Consulta 17
+MATCH (o:Order)-[l:CONTEM_ITEM]->(p:Part)
+WHERE p.brand = 'Brand#23' AND p.container = 'MED BOX'
+WITH p, l
+MATCH (o2:Order)-[l2:CONTEM_ITEM]->(p)
+WITH p, l, 0.2 * AVG(l2.quantity) AS avg_quantity WHERE l.quantity < avg_quantity
+RETURN SUM(l.extendedprice) / 7.0 AS avg_yearly;
+
+// Consulta 18
+MATCH (o:Order)-[l:CONTEM_ITEM]->(:Part)
+WITH o, SUM(l.quantity) AS total_quantity WHERE total_quantity > 300
+MATCH (c:Customer)-[:FEZ_PEDIDO]->(o)
+RETURN c.name AS c_name, c.custkey AS c_custkey, o.orderkey AS o_orderkey, o.orderdate AS o_orderdate, o.totalprice AS o_totalprice, total_quantity AS sum_quantity
+ORDER BY o.totalprice DESC, o.orderdate;
+
+// Consulta 19
+MATCH ()-[l:CONTEM_ITEM]->(p:Part)
+WHERE (p.brand = 'Brand#12' AND p.container IN ['SM CASE', 'SM BOX', 'SM PACK', 'SM PKG'] AND l.quantity >= 1 AND l.quantity <= 11 AND p.size >= 1 AND p.size <= 5 AND l.shipmode IN ['AIR', 'AIR REG'] AND l.shipinstruct = 'DELIVER IN PERSON') OR (p.brand = 'Brand#23' AND p.container IN ['MED BAG', 'MED BOX', 'MED PKG', 'MED PACK'] AND l.quantity >= 10 AND l.quantity <= 20 AND p.size >= 1 AND p.size <= 10 AND l.shipmode IN ['AIR', 'AIR REG'] AND l.shipinstruct = 'DELIVER IN PERSON') OR (p.brand = 'Brand#34' AND p.container IN ['LG CASE', 'LG BOX', 'LG PACK', 'LG PKG'] AND l.quantity >= 20 AND l.quantity <= 30 AND p.size >= 1 AND p.size <= 15 AND l.shipmode IN ['AIR', 'AIR REG'] AND l.shipinstruct = 'DELIVER IN PERSON')
+RETURN SUM(l.extendedprice * (1 - l.discount)) AS revenue;
+
+// Consulta 20
+MATCH (n:Nation {name: 'CANADA'})<-[:MORA_EM]-(s:Supplier)-[ps:FORNECE_PECA]->(p:Part)
+WHERE p.name STARTS WITH 'forest'
+WITH s, ps, p, n
+MATCH (o:Order)-[l:CONTEM_ITEM]->(p)
+WHERE l.suppkey = s.suppkey AND l.shipdate >= '1994-01-01' AND l.shipdate < '1995-01-01'
+WITH s, ps, p, n, 0.5 * SUM(l.quantity) AS half_qty WHERE ps.availqty > half_qty
+RETURN s.name AS s_name, s.address AS s_address ORDER BY s_name;
+
+// Consulta 21
+MATCH (n:Nation {name: 'SAUDI ARABIA'})<-[:MORA_EM]-(s:Supplier)
+MATCH (o:Order {orderstatus: 'F'})-[l1:CONTEM_ITEM]->(:Part)
+WHERE l1.suppkey = s.suppkey AND l1.receiptdate > l1.commitdate AND EXISTS { MATCH (o)-[l2:CONTEM_ITEM]->(:Part) WHERE l2.suppkey <> s.suppkey } AND NOT EXISTS { MATCH (o)-[l3:CONTEM_ITEM]->(:Part) WHERE l3.suppkey <> s.suppkey AND l3.receiptdate > l3.commitdate }
+RETURN s.name AS s_name, count(l1) AS numwait ORDER BY numwait DESC, s_name;
+
+// Consulta 22
+MATCH (c:Customer)
+WITH substring(c.phone, 0, 2) AS cntrycode, c.acctbal AS acctbal WHERE cntrycode IN ['13', '31', '23', '29', '30', '18', '17'] AND acctbal > 0.00
+WITH avg(acctbal) AS avg_acctbal
+MATCH (c2:Customer)
+WITH c2, substring(c2.phone, 0, 2) AS cntrycode, avg_acctbal WHERE cntrycode IN ['13', '31', '23', '29', '30', '18', '17'] AND c2.acctbal > avg_acctbal AND NOT EXISTS { MATCH (c2)-[:FEZ_PEDIDO]->(:Order) }
+RETURN cntrycode, count(c2) AS numcust, sum(c2.acctbal) AS totacctbal ORDER BY cntrycode;
