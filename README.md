@@ -12,6 +12,5 @@ Aqui você encontrará exclusivamente as implementações das **22 consultas do 
 *Nota: Todos os scripts foram projetados para rodar na massa de dados original fornecida pelo benchmark TPC-H, sem que os dados fossem regerados.*
 
 ## 👥 Autores do Projeto
-* Bruno Dutra
 * Pedro Henrique Peixoto Do Amaral
 * Sarah Stephany da Cruz Souza Campos
